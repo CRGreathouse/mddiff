@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+
+import sys
+import difflib
+import hashlib
+import subprocess
+import tempfile
+import re
+import argparse
+
+RED="\033[31m"
+GREEN="\033[32m"
+RESET="\033[0m"
+
+word_re=re.compile(r"[A-Za-z]+")
+
+# ----------------------------
+# Markdown block parsing
+# ----------------------------
+
+def read_blocks(path):
+
+    blocks=[]
+    cur=[]
+
+    with open(path) as f:
+        for line in f:
+
+            if line.startswith("#"):
+
+                if cur:
+                    blocks.append("".join(cur).strip())
+                    cur=[]
+
+            cur.append(line)
+
+    if cur:
+        blocks.append("".join(cur).strip())
+
+    return [b for b in blocks if b.strip()]
+
+# ----------------------------
+# word helpers
+# ----------------------------
+
+def word_set(s):
+    return set(w.lower() for w in word_re.findall(s))
+
+def overlap(a,b):
+    if not a or not b:
+        return 0
+    return len(a & b)/min(len(a),len(b))
+
+ansi_re = re.compile(r'\x1b\[[0-9;]*m')
+
+def strip_escape(s):
+    return ansi_re.sub('', s)
+
+# ----------------------------
+# hashing
+# ----------------------------
+
+def norm(s):
+    return " ".join(s.split())
+
+def hash_para(s):
+    return hashlib.sha1(norm(s).encode()).hexdigest()
+
+# ----------------------------
+# similarity
+# ----------------------------
+
+def containment(a,b):
+    sm=difflib.SequenceMatcher(None,a,b)
+    l=max(m.size for m in sm.get_matching_blocks())
+    return l/min(len(a),len(b))
+
+def similarity(a,b):
+    sm=difflib.SequenceMatcher(None,a,b)
+    return max(sm.ratio(),containment(a,b))
+
+# ----------------------------
+# git word diff
+# ----------------------------
+
+def git_word_diff(a,b):
+
+    with tempfile.NamedTemporaryFile("w+") as fa, tempfile.NamedTemporaryFile("w+") as fb:
+
+        fa.write(a+"\n")
+        fb.write(b+"\n")
+        fa.flush()
+        fb.flush()
+
+        r=subprocess.run(
+            [
+                "git",
+                "diff",
+                "--no-index",
+                "--no-prefix",
+                "--word-diff=color",
+                "--word-diff-regex=\\w+",
+                fa.name,
+                fb.name
+            ],
+            capture_output=True,
+            text=True
+        )
+
+    lines=r.stdout.splitlines()
+
+    out=[]
+    started=False
+
+    for line in lines:
+
+        clean = strip_escape(line)
+
+        if not started:
+            if clean.startswith(("diff","index","---","+++","@@")):
+                continue
+            started=True
+
+        out.append(line)
+
+    return "\n".join(out)
+
+# ----------------------------
+# matching
+# ----------------------------
+
+def remove_exact(a,b):
+
+    h={}
+    for i,p in enumerate(a):
+        h.setdefault(hash_para(p),[]).append(i)
+
+    matches={}
+    matched_a=set()
+
+    for j,p in enumerate(b):
+
+        key=hash_para(p)
+
+        if key in h and h[key]:
+            i=h[key].pop()
+            matches[j]=(i,1.0)
+            matched_a.add(i)
+
+    return matches,matched_a
+
+def match_blocks(a,b,matches,matched_a):
+
+    wa=[word_set(p) for p in a]
+    wb=[word_set(p) for p in b]
+
+    pairs=[]
+
+    for i,pa in enumerate(a):
+
+        if i in matched_a:
+            continue
+
+        for j,pb in enumerate(b):
+
+            if j in matches:
+                continue
+
+            if overlap(wa[i],wb[j])<0.35 and pa not in pb and pb not in pa:
+                continue
+
+            s=similarity(pa,pb)
+
+            if s>0.3:
+                pairs.append((s,i,j))
+
+    pairs.sort(reverse=True)
+
+    for s,i,j in pairs:
+
+        if i not in matched_a and j not in matches:
+            matches[j]=(i,s)
+            matched_a.add(i)
+
+# ----------------------------
+# printing helpers
+# ----------------------------
+
+def print_added(p):
+    for line in p.splitlines():
+        print(GREEN+line+RESET)
+
+def print_deleted(p):
+    for line in p.splitlines():
+        print(RED+line+RESET)
+
+# ----------------------------
+# main diff
+# ----------------------------
+
+def run_diff(a_file,b_file):
+
+    a=read_blocks(a_file)
+    b=read_blocks(b_file)
+
+    matches,matched_a=remove_exact(a,b)
+
+    match_blocks(a,b,matches,matched_a)
+
+    used_a=set(i for i,_ in matches.values())
+
+    prev_i=None
+    next_a=0
+
+    added=deleted=modified=unchanged=0
+
+    for j,pb in enumerate(b):
+
+        if j not in matches:
+            print_added(pb)
+            added+=1
+            continue
+
+        i,score=matches[j]
+
+        while next_a<i:
+            if next_a not in used_a:
+                print_deleted(a[next_a])
+                deleted+=1
+            next_a+=1
+
+        pa=a[i]
+
+        if pa==pb:
+            unchanged+=1
+            print(pa)
+        else:
+            modified+=1
+            print(git_word_diff(pa,pb))
+
+        prev_i=i
+        next_a=i+1
+
+    while next_a<len(a):
+        if next_a not in used_a:
+            print_deleted(a[next_a])
+            deleted+=1
+        next_a+=1
+
+    print("\nSummary")
+    print(f"unchanged: {unchanged}")
+    print(f"modified : {modified}")
+    print(f"added    : {added}")
+    print(f"deleted  : {deleted}")
+
+# ----------------------------
+# CLI
+# ----------------------------
+
+def main():
+
+    parser=argparse.ArgumentParser(
+        prog="mddiff",
+        description="Markdown-aware structural diff with block matching and word-level highlighting."
+    )
+
+    parser.add_argument("file_a", nargs="?")
+    parser.add_argument("file_b", nargs="?")
+
+    args=parser.parse_args()
+
+    if not args.file_a or not args.file_b:
+        parser.print_help()
+        sys.exit(0)
+
+    run_diff(args.file_a,args.file_b)
+
+if __name__=="__main__":
+    main()
+
