@@ -13,6 +13,10 @@ GREEN="\033[32m"
 RESET="\033[0m"
 
 word_re=re.compile(r"[A-Za-z]+")
+ansi_re=re.compile(r'\x1b\[[0-9;]*m')
+
+def strip_ansi(s):
+    return ansi_re.sub('', s)
 
 # ----------------------------
 # Markdown block parsing
@@ -40,31 +44,34 @@ def read_blocks(path):
     return [b for b in blocks if b.strip()]
 
 # ----------------------------
-# word helpers
+# text helpers
 # ----------------------------
 
-def word_set(s):
-    return set(w.lower() for w in word_re.findall(s))
+def normalize_case(s,ignore_case):
+    return s.lower() if ignore_case else s
+
+def word_set(s,ignore_case):
+    if ignore_case:
+        s=s.lower()
+    return set(w for w in word_re.findall(s))
 
 def overlap(a,b):
     if not a or not b:
         return 0
     return len(a & b)/min(len(a),len(b))
 
-ansi_re = re.compile(r'\x1b\[[0-9;]*m')
-
-def strip_escape(s):
-    return ansi_re.sub('', s)
-
 # ----------------------------
 # hashing
 # ----------------------------
 
-def norm(s):
-    return " ".join(s.split())
+def norm(s,ignore_case):
+    s=" ".join(s.split())
+    if ignore_case:
+        s=s.lower()
+    return s
 
-def hash_para(s):
-    return hashlib.sha1(norm(s).encode()).hexdigest()
+def hash_para(s,ignore_case):
+    return hashlib.sha1(norm(s,ignore_case).encode()).hexdigest()
 
 # ----------------------------
 # similarity
@@ -83,12 +90,19 @@ def similarity(a,b):
 # git word diff
 # ----------------------------
 
-def git_word_diff(a,b):
+def git_word_diff(a,b,ignore_case):
+
+    if ignore_case:
+        a_cmp=a.lower()
+        b_cmp=b.lower()
+    else:
+        a_cmp=a
+        b_cmp=b
 
     with tempfile.NamedTemporaryFile("w+") as fa, tempfile.NamedTemporaryFile("w+") as fb:
 
-        fa.write(a+"\n")
-        fb.write(b+"\n")
+        fa.write(a_cmp+"\n")
+        fb.write(b_cmp+"\n")
         fa.flush()
         fb.flush()
 
@@ -114,7 +128,7 @@ def git_word_diff(a,b):
 
     for line in lines:
 
-        clean = strip_escape(line)
+        clean=strip_ansi(line)
 
         if not started:
             if clean.startswith(("diff","index","---","+++","@@")):
@@ -129,18 +143,18 @@ def git_word_diff(a,b):
 # matching
 # ----------------------------
 
-def remove_exact(a,b):
+def remove_exact(a,b,ignore_case):
 
     h={}
     for i,p in enumerate(a):
-        h.setdefault(hash_para(p),[]).append(i)
+        h.setdefault(hash_para(p,ignore_case),[]).append(i)
 
     matches={}
     matched_a=set()
 
     for j,p in enumerate(b):
 
-        key=hash_para(p)
+        key=hash_para(p,ignore_case)
 
         if key in h and h[key]:
             i=h[key].pop()
@@ -149,10 +163,11 @@ def remove_exact(a,b):
 
     return matches,matched_a
 
-def match_blocks(a,b,matches,matched_a):
 
-    wa=[word_set(p) for p in a]
-    wb=[word_set(p) for p in b]
+def match_blocks(a,b,matches,matched_a,ignore_case):
+
+    wa=[word_set(p,ignore_case) for p in a]
+    wb=[word_set(p,ignore_case) for p in b]
 
     pairs=[]
 
@@ -166,10 +181,13 @@ def match_blocks(a,b,matches,matched_a):
             if j in matches:
                 continue
 
-            if overlap(wa[i],wb[j])<0.35 and pa not in pb and pb not in pa:
+            if overlap(wa[i],wb[j])<0.35:
                 continue
 
-            s=similarity(pa,pb)
+            pa_cmp=normalize_case(pa,ignore_case)
+            pb_cmp=normalize_case(pb,ignore_case)
+
+            s=similarity(pa_cmp,pb_cmp)
 
             if s>0.3:
                 pairs.append((s,i,j))
@@ -198,18 +216,21 @@ def print_deleted(p):
 # main diff
 # ----------------------------
 
-def run_diff(a_file,b_file):
+def run_diff(a_file,b_file,ignore_case,report_identical):
 
     a=read_blocks(a_file)
     b=read_blocks(b_file)
 
-    matches,matched_a=remove_exact(a,b)
+    if report_identical and norm("\n".join(a),ignore_case)==norm("\n".join(b),ignore_case):
+        print("Files are identical.")
+        return
 
-    match_blocks(a,b,matches,matched_a)
+    matches,matched_a=remove_exact(a,b,ignore_case)
+
+    match_blocks(a,b,matches,matched_a,ignore_case)
 
     used_a=set(i for i,_ in matches.values())
 
-    prev_i=None
     next_a=0
 
     added=deleted=modified=unchanged=0
@@ -231,14 +252,16 @@ def run_diff(a_file,b_file):
 
         pa=a[i]
 
-        if pa==pb:
+        pa_cmp=normalize_case(pa,ignore_case)
+        pb_cmp=normalize_case(pb,ignore_case)
+
+        if pa_cmp==pb_cmp:
             unchanged+=1
             print(pa)
         else:
             modified+=1
-            print(git_word_diff(pa,pb))
+            print(git_word_diff(pa,pb,ignore_case))
 
-        prev_i=i
         next_a=i+1
 
     while next_a<len(a):
@@ -267,14 +290,30 @@ def main():
     parser.add_argument("file_a", nargs="?")
     parser.add_argument("file_b", nargs="?")
 
+    parser.add_argument(
+        "-i","--ignore-case",
+        action="store_true",
+        help="ignore case differences"
+    )
+
+    parser.add_argument(
+        "-s","--report-identical-files",
+        action="store_true",
+        help="report if files are identical"
+    )
+
     args=parser.parse_args()
 
     if not args.file_a or not args.file_b:
         parser.print_help()
         sys.exit(0)
 
-    run_diff(args.file_a,args.file_b)
+    run_diff(
+        args.file_a,
+        args.file_b,
+        args.ignore_case,
+        args.report_identical_files
+    )
 
 if __name__=="__main__":
     main()
-
