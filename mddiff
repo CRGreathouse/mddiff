@@ -113,7 +113,7 @@ def git_word_diff(a, b, ignore_case):
         r = subprocess.run(
             [
                 'git',
-                'diff'
+                'diff',
                 '--no-index',
                 '--no-prefix',
                 '--word-diff=color',
@@ -125,25 +125,20 @@ def git_word_diff(a, b, ignore_case):
             text=True,
         )
 
-    lines = r.stdout.splitlines()
     out = []
-    started = False
+    in_body = False
 
-    for line in lines:
-        if not started:
-            clean = strip_ansi(line)
-            if clean.startswith(('diff', 'index', '---', '+++', '@@')):
-                continue
-            started = True
-
+    for line in r.stdout.splitlines():
         clean = strip_ansi(line)
-        if clean.startswith('@@'):
+
+        if not in_body:
+            if clean.startswith('@@'):
+                in_body = True
             continue
 
         out.append(line)
 
     return "\n".join(out)
-
 
 # ----------------------------
 # Matching
