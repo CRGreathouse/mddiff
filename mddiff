@@ -8,352 +8,341 @@ import tempfile
 import re
 import argparse
 
-RED="\033[31m"
-GREEN="\033[32m"
-RESET="\033[0m"
+RED = "\033[31m"
+GREEN = "\033[32m"
+RESET = "\033[0m"
 
-word_re=re.compile(r"[A-Za-z]+")
-ansi_re=re.compile(r'\x1b\[[0-9;]*m')
+word_re = re.compile(r"[A-Za-z]+")
+ansi_re = re.compile(r"\x1b\[[0-9;]*m")
+
 
 def strip_ansi(s):
     return ansi_re.sub('', s)
+
 
 # ----------------------------
 # Markdown block parsing
 # ----------------------------
 
 def read_blocks(path):
-
-    blocks=[]
-    cur=[]
+    blocks = []
+    cur = []
 
     with open(path) as f:
         for line in f:
-
-            if line.startswith("#"):
+            if line.startswith('#'):
                 if cur:
-                    blocks.append("".join(cur).strip())
-                    cur=[]
-
+                    blocks.append(''.join(cur).strip())
+                    cur = []
             cur.append(line)
 
     if cur:
-        blocks.append("".join(cur).strip())
+        blocks.append(''.join(cur).strip())
 
     return [b for b in blocks if b.strip()]
 
+
 # ----------------------------
-# text helpers
+# Text helpers
 # ----------------------------
 
-def normalize_case(s,ignore_case):
+def normalize_case(s, ignore_case):
     return s.lower() if ignore_case else s
 
-def word_set(s,ignore_case):
+
+def word_set(s, ignore_case):
     if ignore_case:
-        s=s.lower()
+        s = s.lower()
     return set(word_re.findall(s))
 
-def overlap(a,b):
+
+def overlap(a, b):
     if not a or not b:
-        return 0
-    return len(a & b)/min(len(a),len(b))
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
 
 # ----------------------------
-# hashing
+# Hashing
 # ----------------------------
 
-def norm(s,ignore_case):
-    s=" ".join(s.split())
+def norm(s, ignore_case):
+    s = ' '.join(s.split())
     if ignore_case:
-        s=s.lower()
+        s = s.lower()
     return s
 
-def hash_para(s,ignore_case):
-    return hashlib.sha1(norm(s,ignore_case).encode()).hexdigest()
+
+def hash_para(s, ignore_case):
+    return hashlib.sha1(norm(s, ignore_case).encode()).hexdigest()
+
 
 # ----------------------------
-# similarity
+# Similarity
 # ----------------------------
 
-def containment(a,b):
-    sm=difflib.SequenceMatcher(None,a,b)
-    l=max(m.size for m in sm.get_matching_blocks())
-    return l/min(len(a),len(b))
+def containment(a, b):
+    sm = difflib.SequenceMatcher(None, a, b)
+    longest = max(m.size for m in sm.get_matching_blocks())
+    return longest / min(len(a), len(b))
 
-def similarity(a,b):
-    sm=difflib.SequenceMatcher(None,a,b)
-    return max(sm.ratio(),containment(a,b))
+
+def similarity(a, b):
+    sm = difflib.SequenceMatcher(None, a, b)
+    return max(sm.ratio(), containment(a, b))
+
 
 # ----------------------------
-# git word diff
+# Git word diff
 # ----------------------------
 
-def git_word_diff(a,b,ignore_case):
-
+def git_word_diff(a, b, ignore_case):
     if ignore_case:
-        a_cmp=a.lower()
-        b_cmp=b.lower()
+        a_cmp = a.lower()
+        b_cmp = b.lower()
     else:
-        a_cmp=a
-        b_cmp=b
+        a_cmp = a
+        b_cmp = b
 
-    with tempfile.NamedTemporaryFile("w+") as fa, tempfile.NamedTemporaryFile("w+") as fb:
-
-        fa.write(a_cmp+"\n")
-        fb.write(b_cmp+"\n")
+    with tempfile.NamedTemporaryFile('w+') as fa, tempfile.NamedTemporaryFile('w+') as fb:
+        fa.write(a_cmp + "\n")
+        fb.write(b_cmp + "\n")
         fa.flush()
         fb.flush()
 
-        r=subprocess.run(
+        r = subprocess.run(
             [
-                "git",
-                "diff",
-                "--no-index",
-                "--no-prefix",
-                "--word-diff=color",
+                'git',
+                'diff'
+                '--no-index',
+                '--no-prefix',
+                '--word-diff=color',
                 "--word-diff-regex=\\w+",
                 fa.name,
-                fb.name
+                fb.name,
             ],
             capture_output=True,
-            text=True
+            text=True,
         )
 
-    lines=r.stdout.splitlines()
-
-    out=[]
-    started=False
+    lines = r.stdout.splitlines()
+    out = []
+    started = False
 
     for line in lines:
-
         if not started:
-            clean=strip_ansi(line)
-            if clean.startswith(("diff","index","---","+++","@@")):
+            clean = strip_ansi(line)
+            if clean.startswith(('diff', 'index', '---', '+++', '@@')):
                 continue
-            started=True
+            started = True
 
-        clean=strip_ansi(line)
-        if clean.startswith("@@"):
+        clean = strip_ansi(line)
+        if clean.startswith('@@'):
             continue
 
         out.append(line)
 
     return "\n".join(out)
 
+
 # ----------------------------
-# matching
+# Matching
 # ----------------------------
 
-def remove_exact(a,b,ignore_case):
+def remove_exact(a, b, ignore_case):
+    h = {}
+    for i, p in enumerate(a):
+        h.setdefault(hash_para(p, ignore_case), []).append(i)
 
-    h={}
-    for i,p in enumerate(a):
-        h.setdefault(hash_para(p,ignore_case),[]).append(i)
+    matches = {}
+    matched_a = set()
 
-    matches={}
-    matched_a=set()
-
-    for j,p in enumerate(b):
-
-        key=hash_para(p,ignore_case)
-
+    for j, p in enumerate(b):
+        key = hash_para(p, ignore_case)
         if key in h and h[key]:
-            i=h[key].pop()
-            matches[j]=(i,1.0)
+            i = h[key].pop()
+            matches[j] = (i, 1.0)
             matched_a.add(i)
 
-    return matches,matched_a
+    return matches, matched_a
 
 
-def match_blocks(a,b,matches,matched_a,ignore_case,threshold):
+def match_blocks(a, b, matches, matched_a, ignore_case, threshold):
+    wa = [word_set(p, ignore_case) for p in a]
+    wb = [word_set(p, ignore_case) for p in b]
 
-    wa=[word_set(p,ignore_case) for p in a]
-    wb=[word_set(p,ignore_case) for p in b]
+    pairs = []
 
-    pairs=[]
-
-    for i,pa in enumerate(a):
-
+    for i, pa in enumerate(a):
         if i in matched_a:
             continue
 
-        for j,pb in enumerate(b):
-
+        for j, pb in enumerate(b):
             if j in matches:
                 continue
 
-            if overlap(wa[i],wb[j]) < threshold:
+            if overlap(wa[i], wb[j]) < threshold:
                 continue
 
-            pa_cmp=normalize_case(pa,ignore_case)
-            pb_cmp=normalize_case(pb,ignore_case)
+            pa_cmp = normalize_case(pa, ignore_case)
+            pb_cmp = normalize_case(pb, ignore_case)
 
-            s=similarity(pa_cmp,pb_cmp)
-
-            if s>0.3:
-                pairs.append((s,i,j))
+            s = similarity(pa_cmp, pb_cmp)
+            if s > 0.3:
+                pairs.append((s, i, j))
 
     pairs.sort(reverse=True)
 
-    for s,i,j in pairs:
-
+    for s, i, j in pairs:
         if i not in matched_a and j not in matches:
-            matches[j]=(i,s)
+            matches[j] = (i, s)
             matched_a.add(i)
 
+
 # ----------------------------
-# event construction
+# Event construction
 # ----------------------------
 
-def build_events(a,b,matches,ignore_case):
+def build_events(a, b, matches, ignore_case):
+    used_a = {i for i, _ in matches.values()}
+    next_a = 0
+    events = []
 
-    used_a=set(i for i,_ in matches.values())
-    next_a=0
-
-    events=[]
-
-    for j,pb in enumerate(b):
-
+    for j, pb in enumerate(b):
         if j not in matches:
-            events.append(("added",pb))
+            events.append(('added', pb))
             continue
 
-        i,_=matches[j]
+        i, _ = matches[j]
 
-        while next_a<i:
+        while next_a < i:
             if next_a not in used_a:
-                events.append(("deleted",a[next_a]))
-            next_a+=1
+                events.append(('deleted', a[next_a]))
+            next_a += 1
 
-        pa=a[i]
+        pa = a[i]
 
-        if normalize_case(pa,ignore_case)==normalize_case(pb,ignore_case):
-            events.append(("unchanged",pa))
+        if normalize_case(pa, ignore_case) == normalize_case(pb, ignore_case):
+            events.append(('unchanged', pa))
         else:
-            events.append(("modified",(pa,pb)))
+            events.append(('modified', (pa, pb)))
 
-        next_a=i+1
+        next_a = i + 1
 
-    while next_a<len(a):
+    while next_a < len(a):
         if next_a not in used_a:
-            events.append(("deleted",a[next_a]))
-        next_a+=1
+            events.append(('deleted', a[next_a]))
+        next_a += 1
 
     return events
 
+
 # ----------------------------
-# context filtering
+# Context filtering
 # ----------------------------
 
-def apply_context(events,context):
-
-    change_indices=[i for i,(t,_) in enumerate(events) if t!="unchanged"]
-
-    keep=set()
+def apply_context(events, context):
+    change_indices = [i for i, (t, _) in enumerate(events) if t != 'unchanged']
+    keep = set()
 
     if not change_indices:
-
-        for i in range(min(context,len(events))):
+        for i in range(min(context, len(events))):
             keep.add(i)
-
-        for i in range(max(len(events)-context,0),len(events)):
+        for i in range(max(len(events) - context, 0), len(events)):
             keep.add(i)
-
     else:
-
         for i in change_indices:
-            for j in range(i-context,i+context+1):
-                if 0<=j<len(events):
+            for j in range(i - context, i + context + 1):
+                if 0 <= j < len(events):
                     keep.add(j)
 
-    filtered=[]
-    i=0
+    filtered = []
+    i = 0
 
-    while i<len(events):
-
+    while i < len(events):
         if i not in keep:
-            filtered.append(("skip",None))
-            while i<len(events) and i not in keep:
-                i+=1
+            filtered.append(('skip', None))
+            while i < len(events) and i not in keep:
+                i += 1
             continue
 
         filtered.append(events[i])
-        i+=1
+        i += 1
 
     return filtered
 
+
 # ----------------------------
-# summary
+# Summary
 # ----------------------------
 
 def compute_summary(events):
+    added = deleted = modified = unchanged = 0
 
-    added=deleted=modified=unchanged=0
+    for t, _ in events:
+        if t == 'added':
+            added += 1
+        elif t == 'deleted':
+            deleted += 1
+        elif t == 'modified':
+            modified += 1
+        elif t == 'unchanged':
+            unchanged += 1
 
-    for t,_ in events:
-        if t=="added": added+=1
-        elif t=="deleted": deleted+=1
-        elif t=="modified": modified+=1
-        elif t=="unchanged": unchanged+=1
+    return unchanged, modified, added, deleted
 
-    return unchanged,modified,added,deleted
 
 # ----------------------------
-# printing
+# Printing
 # ----------------------------
 
-def print_events(events,ignore_case):
-
-    for t,data in events:
-
-        if t=="skip":
-            print("...")
+def print_events(events, ignore_case):
+    for t, data in events:
+        if t == 'skip':
+            print('...')
             continue
 
-        if t=="added":
+        if t == 'added':
             for l in data.splitlines():
-                print(GREEN+l+RESET)
+                print(GREEN + l + RESET)
 
-        elif t=="deleted":
+        elif t == 'deleted':
             for l in data.splitlines():
-                print(RED+l+RESET)
+                print(RED + l + RESET)
 
-        elif t=="unchanged":
+        elif t == 'unchanged':
             print(data)
 
-        elif t=="modified":
-            pa,pb=data
-            print(git_word_diff(pa,pb,ignore_case))
+        elif t == 'modified':
+            pa, pb = data
+            print(git_word_diff(pa, pb, ignore_case))
+
 
 # ----------------------------
-# main diff
+# Main diff
 # ----------------------------
 
-def run_diff(a_file,b_file,ignore_case,report_identical,context,threshold,shortstat):
+def run_diff(a_file, b_file, ignore_case, report_identical, context, threshold, shortstat):
+    a = read_blocks(a_file)
+    b = read_blocks(b_file)
 
-    a=read_blocks(a_file)
-    b=read_blocks(b_file)
-
-    if report_identical and norm("\n".join(a),ignore_case)==norm("\n".join(b),ignore_case):
-        print("Files are identical.")
+    if report_identical and norm("\n".join(a), ignore_case) == norm("\n".join(b), ignore_case):
+        print('Files are identical.')
         return
 
-    matches,matched_a=remove_exact(a,b,ignore_case)
+    matches, matched_a = remove_exact(a, b, ignore_case)
+    match_blocks(a, b, matches, matched_a, ignore_case, threshold)
 
-    match_blocks(a,b,matches,matched_a,ignore_case,threshold)
-
-    events=build_events(a,b,matches,ignore_case)
-
-    summary=compute_summary(events)
+    events = build_events(a, b, matches, ignore_case)
+    summary = compute_summary(events)
 
     if context is not None:
-        events=apply_context(events,context)
+        events = apply_context(events, context)
 
     if not shortstat:
-        print_events(events,ignore_case)
+        print_events(events, ignore_case)
 
-    unchanged,modified,added,deleted=summary
+    unchanged, modified, added, deleted = summary
 
     print("\nSummary")
     print(f"unchanged: {unchanged}")
@@ -361,49 +350,49 @@ def run_diff(a_file,b_file,ignore_case,report_identical,context,threshold,shorts
     print(f"added    : {added}")
     print(f"deleted  : {deleted}")
 
+
 # ----------------------------
 # CLI
 # ----------------------------
 
 def main():
+    parser = argparse.ArgumentParser()
 
-    parser=argparse.ArgumentParser()
+    parser.add_argument("file_a", nargs="?")
+    parser.add_argument("file_b", nargs="?")
 
-    parser.add_argument("file_a",nargs="?")
-    parser.add_argument("file_b",nargs="?")
+    parser.add_argument("-i", "--ignore-case", action="store_true")
+    parser.add_argument("-s", "--report-identical-files", action="store_true")
 
-    parser.add_argument("-i","--ignore-case",action="store_true")
-    parser.add_argument("-s","--report-identical-files",action="store_true")
-
-    parser.add_argument("-c",action="store_true",help="show context (default 3)")
-    parser.add_argument("-C","--context",type=int,help="context blocks")
+    parser.add_argument("-c", action="store_true", help="show context (default 3)")
+    parser.add_argument("-C", "--context", type=int, help="context blocks")
 
     parser.add_argument(
         "--match-threshold",
         type=float,
         default=35.0,
-        help="minimum word overlap percentage (default 35)"
+        help="minimum word overlap percentage (default 35)",
     )
 
     parser.add_argument(
         "--shortstat",
         action="store_true",
-        help="show only summary statistics"
+        help="show only summary statistics",
     )
 
-    args=parser.parse_args()
+    args = parser.parse_args()
 
     if not args.file_a or not args.file_b:
         parser.print_help()
         sys.exit(0)
 
-    context=None
+    context = None
     if args.c:
-        context=3
+        context = 3
     if args.context is not None:
-        context=args.context
+        context = args.context
 
-    threshold=args.match_threshold/100.0
+    threshold = args.match_threshold / 100.0
 
     run_diff(
         args.file_a,
@@ -412,8 +401,9 @@ def main():
         args.report_identical_files,
         context,
         threshold,
-        args.shortstat
+        args.shortstat,
     )
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     main()
